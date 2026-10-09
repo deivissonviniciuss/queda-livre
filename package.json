@@ -1,0 +1,16 @@
+{
+  "name": "queda-livre",
+  "version": "0.1.0",
+  "description": "Queda Livre - mini battle royale multiplayer para jogar no navegador",
+  "type": "module",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "test": "node server/selftest.js"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "three": "^0.186.1",
+    "ws": "^8.22.0"
+  }
+}

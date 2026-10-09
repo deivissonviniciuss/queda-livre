@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Queda Livre</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🪂</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bungee&family=Barlow+Condensed:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+  <script type="importmap">{ "imports": { "three": "/vendor/three/three.module.js" } }</script>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+
+  <!-- ============================== LOBBY ============================== -->
+  <div id="lobby" class="screen">
+    <div class="panel-col">
+      <header class="logo">
+        <div class="hazard"></div>
+        <h1>QUEDA<br><span>LIVRE</span></h1>
+        <p>Battle royale para jogar com a galera. Salte do avião, pegue armas e seja o último de pé.</p>
+      </header>
+
+      <section class="card">
+        <label class="card-title" for="in-name">Seu nome de combatente</label>
+        <input id="in-name" maxlength="16" autocomplete="off" spellcheck="false">
+      </section>
+
+      <section class="card">
+        <div class="card-title">Visual</div>
+        <div id="skins" class="grid-2"></div>
+        <p class="hint">Todos têm o mesmo desempenho. A diferença é só no visual.</p>
+      </section>
+
+      <section class="card">
+        <div class="card-title">Cor</div>
+        <div id="colors" class="swatches"></div>
+      </section>
+
+      <section class="card">
+        <div class="card-title">Controles</div>
+        <label class="toggle"><input type="checkbox" id="opt-assist"><span class="sw"></span><span><b>Mira assistida</b><small>A mira puxa para o inimigo perto do cursor, como no celular</small></span></label>
+        <label class="toggle"><input type="checkbox" id="opt-autofire"><span class="sw"></span><span><b>Tiro automático</b><small>Atira sozinho quando a mira assistida trava em alguém</small></span></label>
+      </section>
+
+      <section class="card">
+        <div class="card-title">Partida <span id="host-tag" class="tag"></span></div>
+        <div class="field">
+          <div class="field-row"><span>Combatentes (com bots)</span><b id="total-val">10</b></div>
+          <input type="range" id="in-total" min="2" max="20" value="10">
+        </div>
+        <div class="field">
+          <div class="field-row"><span>Dificuldade dos bots</span></div>
+          <div class="segmented" id="difficulty">
+            <button data-v="easy">Fácil</button><button data-v="normal">Normal</button><button data-v="hard">Difícil</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-title">Na sala</div>
+        <ul id="room"></ul>
+        <div id="share" class="share"></div>
+      </section>
+
+      <section class="card" id="results-card" hidden>
+        <div class="card-title">Última partida</div>
+        <ol id="results"></ol>
+      </section>
+
+      <section class="card">
+        <div class="card-title">Como jogar</div>
+        <div class="keys">
+          <div><kbd>W A S D</kbd> mover</div>
+          <div><kbd>Mouse</kbd> mirar e atirar</div>
+          <div><kbd>Espaço</kbd> saltar do avião</div>
+          <div><kbd>E</kbd> pegar / trocar arma</div>
+          <div><kbd>R</kbd> recarregar</div>
+          <div><kbd>1</kbd><kbd>2</kbd> / roda trocar arma</div>
+          <div><kbd>Q</kbd> usar kit médico</div>
+          <div><kbd>G</kbd> jogar granada</div>
+          <div><kbd>M</kbd> mapa grande</div>
+          <div><kbd>Esc</kbd> menu</div>
+        </div>
+        <p class="hint">Munição, kits, coletes e granadas são pegos automaticamente ao passar por cima. Também funciona com controle de videogame.</p>
+      </section>
+      <div class="spacer"></div>
+    </div>
+
+    <div class="play-bar">
+      <button id="btn-play" class="btn-play">SALTAR!</button>
+      <div id="play-hint" class="play-hint"></div>
+    </div>
+  </div>
+
+  <!-- ============================== HUD ============================== -->
+  <div id="hud" hidden>
+    <div id="zone-tint"></div>
+    <div id="vignette"></div>
+    <div id="labels"></div>
+
+    <div class="hud-top">
+      <div class="pill"><span class="ico">👤</span><b id="h-alive">0</b><small>vivos</small></div>
+      <div class="pill"><span class="ico">💀</span><b id="h-kills">0</b><small>abates</small></div>
+      <div class="pill zone" id="h-zone-pill"><span class="ico">⭕</span><span id="h-zone">Zona</span></div>
+    </div>
+
+    <div id="killfeed"></div>
+    <div id="minimap-wrap"><canvas id="minimap" width="360" height="360"></canvas></div>
+
+    <div id="center-msg"></div>
+    <div id="toast"></div>
+    <div id="prompt"></div>
+    <div id="progress" hidden><div class="lbl" id="progress-lbl"></div><div class="bar"><i id="progress-fill"></i></div></div>
+
+    <div class="hud-bottom">
+      <div class="vitals">
+        <div class="bar armor"><i id="armor-fill"></i><span id="armor-txt"></span></div>
+        <div class="bar hp"><i id="hp-fill"></i><span id="hp-txt">100</span></div>
+      </div>
+      <div class="loadout">
+        <div class="slot" id="slot0"><kbd>1</kbd><b class="wname">Vazio</b><span class="ammo"></span></div>
+        <div class="slot" id="slot1"><kbd>2</kbd><b class="wname">Vazio</b><span class="ammo"></span></div>
+        <div class="items">
+          <div class="item" id="it-med"><kbd>Q</kbd><span>✚</span><b>0</b></div>
+          <div class="item" id="it-nade"><kbd>G</kbd><span>●</span><b>0</b></div>
+          <div class="item" id="it-ammo"><span>⁍</span><b>0</b></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="crosshair"><i></i><i></i><i></i><i></i></div>
+  </div>
+
+  <!-- ============================== OVERLAYS ============================== -->
+  <div id="death" class="overlay" hidden>
+    <div class="ov-card">
+      <div class="ov-kicker">Você foi abatido</div>
+      <div class="ov-big" id="death-place">#5</div>
+      <div class="ov-sub" id="death-by"></div>
+      <div class="ov-stats" id="death-stats"></div>
+      <div class="ov-actions">
+        <button class="btn" id="btn-spectate">Assistir</button>
+        <button class="btn primary" id="btn-leave">Voltar ao lobby</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="final" class="overlay" hidden>
+    <div class="ov-card wide">
+      <div class="ov-kicker" id="final-kicker">Fim de partida</div>
+      <div class="ov-big" id="final-title">ÚLTIMO DE PÉ!</div>
+      <div class="ov-sub" id="final-sub"></div>
+      <ol class="standings" id="final-standings"></ol>
+      <div class="ov-actions">
+        <button class="btn primary" id="btn-final-leave">Voltar ao lobby</button>
+      </div>
+      <div class="ov-foot" id="final-foot"></div>
+    </div>
+  </div>
+
+  <div id="menu" class="overlay" hidden>
+    <div class="ov-card">
+      <div class="ov-big small">Pausa</div>
+      <p class="ov-sub">A partida continua rolando enquanto este menu está aberto.</p>
+      <label class="toggle"><input type="checkbox" id="m-assist"><span class="sw"></span><span><b>Mira assistida</b></span></label>
+      <label class="toggle"><input type="checkbox" id="m-autofire"><span class="sw"></span><span><b>Tiro automático</b></span></label>
+      <div class="ov-actions">
+        <button class="btn" id="btn-resume">Continuar</button>
+        <button class="btn danger" id="btn-quit">Sair da partida</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="top-buttons">
+    <button id="btn-sound" class="chip">Som: ligado</button>
+  </div>
+  <div id="conn" class="conn" hidden>Conectando ao servidor…</div>
+
+  <script type="module" src="/js/main.js"></script>
+</body>
+</html>
