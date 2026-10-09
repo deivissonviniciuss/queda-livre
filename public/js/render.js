@@ -470,8 +470,14 @@ export class ZoneView {
 
 // --------------------------------------------------------------- efeitos
 const particleGeo = new THREE.BoxGeometry(1, 1, 1);
+const puffGeo = new THREE.IcosahedronGeometry(1, 0);
+const casingGeo = new THREE.BoxGeometry(0.05, 0.05, 0.13);
+const shellGeo = new THREE.BoxGeometry(0.08, 0.08, 0.18);
+const ringGeo = new THREE.RingGeometry(0.85, 1, 40);
 const tracerGeo = new THREE.BoxGeometry(1, 0.07, 0.07);
 const TRACER_COLOR = { pistol: '#fde68a', smg: '#bae6fd', shotgun: '#fdba74', rifle: '#e9d5ff', sniper: '#fef08a' };
+const MAX_PARTS = 600;
+const MUZZLE_LIGHT = 7;
 
 export class Effects {
   constructor(scene) {
@@ -483,6 +489,26 @@ export class Effects {
     this.decals = [];
     this.flashGeo = new THREE.IcosahedronGeometry(0.28, 0);
     this.boomGeo = new THREE.IcosahedronGeometry(1, 1);
+    // uma única luz reaproveitada para o clarão dos tiros: acender e apagar luzes
+    // novas obrigaria o three.js a recompilar os shaders
+    this.light = new THREE.PointLight('#ffb54a', 0, 10, 2);
+    this.lightLife = 0;
+    scene.add(this.light);
+  }
+
+  // partícula genérica. mode: 'decay' (encolhe sempre), 'tail' (some no fim), 'puff' (cresce e some)
+  spawn(geo, material, x, y, z, o) {
+    if (this.parts.length >= MAX_PARTS) return;
+    const m = new THREE.Mesh(geo, material);
+    m.position.set(x, y, z);
+    m.scale.setScalar(o.size);
+    if (o.spin) m.rotation.set(Math.random() * 6, Math.random() * 6, 0);
+    this.scene.add(m);
+    this.parts.push({
+      m, vx: o.vx || 0, vy: o.vy || 0, vz: o.vz || 0, life: o.life, max: o.life, size: o.size,
+      g: o.g ?? 14, mode: o.mode || 'decay', grow: o.grow || 0, spin: o.spin || 0, bounce: o.bounce || 0,
+      floor: o.floor ?? 0.05, drag: o.drag || 0,
+    });
   }
 
   tracer(id, x, y, a, w, world) {
@@ -505,28 +531,70 @@ export class Effects {
     if (kind === 'flesh') this.burst(x, 1.1, y, ['#dc2626', '#991b1b', '#f87171'], 8, 5, 0.45, 0.11);
   }
 
-  muzzle(x, y, a, len = 1.1) {
+  muzzle(x, y, a, len = 1.1, big = false) {
     const m = new THREE.Mesh(this.flashGeo, basic('#fde047'));
-    m.position.set(x + Math.cos(a) * len, 1.12, y + Math.sin(a) * len);
+    const fx = x + Math.cos(a) * len, fz = y + Math.sin(a) * len;
+    m.position.set(fx, 1.12, fz);
+    m.scale.setScalar(big ? 1.8 : 1);
     this.scene.add(m);
     this.flashes.push({ m, life: 0.05 });
+    // fumacinha saindo do cano
+    this.spawn(puffGeo, basic('#e7e5e4', 0.45), fx, 1.15, fz, {
+      size: big ? 0.22 : 0.12, vx: Math.cos(a) * 1.5, vy: 0.6, vz: Math.sin(a) * 1.5, g: -0.6, life: big ? 0.7 : 0.4, mode: 'puff', grow: 2.2, drag: 3,
+    });
+    this.light.position.set(fx, 1.6, fz);
+    this.lightLife = 0.07;
+  }
+
+  // cápsula ejetada para o lado direito da arma; quica e fica um tempo no chão
+  casing(x, y, a, w) {
+    const shell = w === 'shotgun';
+    const rx = -Math.sin(a), ry = Math.cos(a);
+    const s = 2 + Math.random() * 1.4;
+    this.spawn(shell ? shellGeo : casingGeo, mat(shell ? '#b91c1c' : '#d4a017'), x + Math.cos(a) * 0.45 + rx * 0.25, 1.2, y + Math.sin(a) * 0.45 + ry * 0.25, {
+      size: 1, vx: rx * s - Math.cos(a) * 0.7, vy: 2.6 + Math.random() * 1.6, vz: ry * s - Math.sin(a) * 0.7,
+      g: 20, life: 2.4 + Math.random(), mode: 'tail', spin: 16, bounce: 0.38, floor: 0.03,
+    });
+  }
+
+  // poeirinha dos passos
+  step(x, y) {
+    for (let i = 0; i < 2; i++) {
+      this.spawn(puffGeo, basic('#cdbd92', 0.5), x + (Math.random() - 0.5) * 0.5, 0.12, y + (Math.random() - 0.5) * 0.5, {
+        size: 0.12 + Math.random() * 0.08, vx: (Math.random() - 0.5) * 0.8, vy: 0.5, vz: (Math.random() - 0.5) * 0.8, g: -0.3, life: 0.55, mode: 'puff', grow: 1.6,
+      });
+    }
+  }
+
+  // rastro de vento nas pontas do paraquedas
+  trail(x, y, z) {
+    this.spawn(puffGeo, basic('#ffffff', 0.55), x, y, z, { size: 0.16, g: 0, life: 0.8, mode: 'puff', grow: 0.8 });
   }
 
   burst(x, y, z, colors, n, speed, life, size) {
     for (let i = 0; i < n; i++) {
-      if (this.parts.length > 400) break;
-      const m = new THREE.Mesh(particleGeo, basic(colors[i % colors.length]));
-      m.scale.setScalar(size * (0.6 + Math.random() * 0.8));
-      m.position.set(x, y, z);
-      this.scene.add(m);
       const a = Math.random() * Math.PI * 2;
       const s = speed * (0.3 + Math.random() * 0.7);
-      this.parts.push({ m, vx: Math.cos(a) * s, vy: speed * (0.2 + Math.random() * 0.8), vz: Math.sin(a) * s, life, max: life, g: 14 });
+      this.spawn(particleGeo, basic(colors[i % colors.length]), x, y, z, {
+        size: size * (0.6 + Math.random() * 0.8), vx: Math.cos(a) * s, vy: speed * (0.2 + Math.random() * 0.8), vz: Math.sin(a) * s, life,
+      });
     }
   }
 
   dust(x, y, n = 10) {
     this.burst(x, 0.3, y, ['#d6c7a1', '#c2b280', '#e7e5e4'], n, 3, 0.6, 0.18);
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2;
+      this.spawn(puffGeo, basic('#d6c7a1', 0.55), x, 0.25, y, { size: 0.2, vx: Math.cos(a) * 3, vy: 0.4, vz: Math.sin(a) * 3, g: 0, life: 0.7, mode: 'puff', grow: 1.3, drag: 3 });
+    }
+  }
+
+  ring(x, y, color, radius, life, opacity = 0.8) {
+    const m = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthWrite: false, side: THREE.DoubleSide }));
+    m.rotation.x = -Math.PI / 2;
+    m.position.set(x, 0.12, y);
+    this.scene.add(m);
+    this.flashes.push({ m, life, max: life, ring: radius, op: opacity });
   }
 
   explosion(x, y) {
@@ -534,7 +602,16 @@ export class Effects {
     m.position.set(x, 1, y);
     this.scene.add(m);
     this.flashes.push({ m, life: 0.45, max: 0.45, boom: true });
+    this.ring(x, y, '#fff7ed', 7.5, 0.35);
     this.burst(x, 0.8, y, ['#f97316', '#facc15', '#ef4444', '#57534e', '#78716c'], 40, 11, 0.9, 0.3);
+    for (let i = 0; i < 12; i++) {
+      const a = Math.random() * Math.PI * 2, s = 1 + Math.random() * 2.5;
+      this.spawn(puffGeo, basic(i % 3 ? '#57534e' : '#78716c', 0.75), x + Math.cos(a) * 0.6, 0.8 + Math.random(), y + Math.sin(a) * 0.6, {
+        size: 0.55 + Math.random() * 0.4, vx: Math.cos(a) * s, vy: 1.2 + Math.random() * 1.5, vz: Math.sin(a) * s, g: -0.5, life: 1.6 + Math.random() * 0.8, mode: 'puff', grow: 1.8, drag: 1.2,
+      });
+    }
+    this.light.position.set(x, 3, y);
+    this.lightLife = 0.25;
     const d = new THREE.Mesh(new THREE.CircleGeometry(2.6, 14), new THREE.MeshBasicMaterial({ color: '#1c1917', transparent: true, opacity: 0.5, depthWrite: false }));
     d.rotation.x = -Math.PI / 2;
     d.position.set(x, 0.07, y);
@@ -576,12 +653,28 @@ export class Effects {
     for (let i = this.parts.length - 1; i >= 0; i--) {
       const p = this.parts[i];
       p.life -= dt;
+      if (p.life <= 0) { this.scene.remove(p.m); this.parts.splice(i, 1); continue; }
       p.vy -= p.g * dt;
-      p.m.position.x += p.vx * dt; p.m.position.y += p.vy * dt; p.m.position.z += p.vz * dt;
-      if (p.m.position.y < 0.05) { p.m.position.y = 0.05; p.vx *= 0.6; p.vz *= 0.6; p.vy = 0; }
-      if (p.life <= 0) { this.scene.remove(p.m); this.parts.splice(i, 1); }
-      else p.m.scale.multiplyScalar(0.985);
+      if (p.drag) { const d = Math.exp(-p.drag * dt); p.vx *= d; p.vz *= d; if (p.g <= 0) p.vy *= d; }
+      const pos = p.m.position;
+      pos.x += p.vx * dt; pos.y += p.vy * dt; pos.z += p.vz * dt;
+      if (pos.y < p.floor) {
+        pos.y = p.floor;
+        if (p.bounce && p.vy < -1.5) { p.vy = -p.vy * p.bounce; p.vx *= 0.55; p.vz *= 0.55; p.spin *= 0.5; }
+        else { p.vx *= 0.6; p.vz *= 0.6; p.vy = 0; if (p.spin) { p.spin = 0; p.m.rotation.x = 0; p.m.rotation.z = 0; } }
+      }
+      if (p.spin) { p.m.rotation.x += p.spin * dt; p.m.rotation.y += p.spin * 0.7 * dt; }
+      const age = p.max - p.life;
+      let s;
+      if (p.mode === 'tail') s = p.size * Math.min(1, p.life / (p.max * 0.25));
+      else if (p.mode === 'puff') s = p.size * (1 + (age / p.max) * p.grow) * Math.min(1, p.life / (p.max * 0.4));
+      else s = p.size * Math.pow(0.985, age * 60);
+      p.m.scale.setScalar(s);
     }
+    if (this.lightLife > 0) {
+      this.lightLife -= dt;
+      this.light.intensity = Math.max(0, this.lightLife) / 0.07 * MUZZLE_LIGHT;
+    } else this.light.intensity = 0;
     for (let i = this.flashes.length - 1; i >= 0; i--) {
       const f = this.flashes[i];
       f.life -= dt;
@@ -589,8 +682,12 @@ export class Effects {
         const k = 1 - f.life / f.max;
         f.m.scale.setScalar(1 + k * 6);
         f.m.material.opacity = 0.9 * (1 - k);
+      } else if (f.ring) {
+        const k = 1 - Math.max(0, f.life) / f.max;
+        f.m.scale.setScalar(0.5 + (1 - (1 - k) * (1 - k)) * f.ring);
+        f.m.material.opacity = f.op * (1 - k);
       }
-      if (f.life <= 0) { this.scene.remove(f.m); if (f.boom) f.m.material.dispose(); this.flashes.splice(i, 1); }
+      if (f.life <= 0) { this.scene.remove(f.m); if (f.boom || f.ring) f.m.material.dispose(); this.flashes.splice(i, 1); }
     }
     for (const n of this.nades.values()) {
       n.t += dt;

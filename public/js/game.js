@@ -13,6 +13,12 @@ import { Hud } from './hud.js';
 const WEAPON_KEYS = ['fist', 'pistol', 'smg', 'shotgun', 'rifle', 'sniper'];
 const SEND_INTERVAL = 1 / 30;
 const KICK = { pistol: 0.12, smg: 0.08, shotgun: 0.45, rifle: 0.14, sniper: 0.6 };
+// tranco visual da arma na mão de cada personagem
+const RECOIL = { pistol: 0.6, smg: 0.45, shotgun: 1, rifle: 0.55, sniper: 1.2 };
+// quanto a mira abre a cada tiro (px)
+const BLOOM = { pistol: 7, smg: 4, shotgun: 14, rifle: 5, sniper: 18 };
+const CORPSE_TIME = 9;   // segundos que o corpo fica no chão
+const FX_RANGE = 45;     // efeitos pequenos (cápsulas, poeira) só perto da câmera
 
 export class ClientGame {
   constructor({ info, meId, renderer, net, input, sfx, settings, onLeave }) {
@@ -58,6 +64,10 @@ export class ClientGame {
     this.aimPoint = { x: 0, y: 0 };
     this.lock = null;
     this.shake = 0;
+    this.camKick = new THREE.Vector2();
+    this.fovPunch = 0;
+    this.slowMo = 0;
+    this.lastBoom = null;
     this.sendAcc = 0;
     this.dead = false;
     this.over = false;
@@ -83,7 +93,8 @@ export class ClientGame {
     this.players.set(p.id, {
       ...p, char, x: this.info.plane.x0, y: this.info.plane.y0, z: 0, rx: 0, ry: 0, rz: 0,
       aim: 0, ra: 0, hp: 100, armor: 0, alive: true, inPlane: true, healing: false, reloading: false,
-      moving: false, w: 'fist', walk: 0, label: null, deadAt: 0,
+      moving: false, w: 'fist', walk: 0, label: null,
+      kick: 0, hitT: 0, stepT: 0, trailT: 0, landedDust: false,
     });
   }
 
@@ -148,9 +159,19 @@ export class ClientGame {
       case 's': {
         e.b.forEach(([id, a]) => this.fx.tracer(id, e.x, e.y, a, e.w, this.world));
         const a0 = e.b[0][1];
-        this.fx.muzzle(e.x, e.y, a0, e.w === 'sniper' ? 1.9 : 1.2);
+        this.fx.muzzle(e.x, e.y, a0, e.w === 'sniper' ? 1.9 : e.w === 'shotgun' ? 1.6 : 1.2, e.w === 'sniper' || e.w === 'shotgun');
         this.sfx.shot(e.w, e.x, e.y);
-        if (e.id === me) this.shake = Math.max(this.shake, KICK[e.w] || 0.1);
+        const p = this.players.get(e.id);
+        if (p) p.kick = RECOIL[e.w] || 0.5;
+        if (this.nearFocus(e.x, e.y)) this.fx.casing(e.x, e.y, a0, e.w);
+        if (e.id === me) {
+          this.shake = Math.max(this.shake, (KICK[e.w] || 0.1) * 0.6);
+          // a câmera é empurrada para trás, contra a direção do tiro
+          const k = (KICK[e.w] || 0.1) * 1.4;
+          this.camKick.x -= Math.cos(a0) * k;
+          this.camKick.y -= Math.sin(a0) * k;
+          this.hud.bloomKick(BLOOM[e.w] || 6);
+        }
         break;
       }
       case 'm': {
@@ -161,7 +182,15 @@ export class ClientGame {
       case 'h': {
         if (e.b) this.fx.endTracer(e.b, e.x, e.y, 'flesh');
         else this.fx.burst(e.x, 1.1, e.y, ['#dc2626', '#991b1b'], 6, 4, 0.4, 0.1);
-        if (e.v === me) { this.hud.hurt(); this.sfx.hurt(); this.shake = Math.max(this.shake, 0.25); }
+        const victim = this.players.get(e.v);
+        if (victim) victim.hitT = 0.14;
+        if (e.v === me) {
+          this.hud.hurt(); this.sfx.hurt(); this.shake = Math.max(this.shake, 0.25);
+          // de onde veio o dano: o ponto da explosão (granada) ou a posição do atacante
+          const boom = !e.b && this.lastBoom && performance.now() - this.lastBoom.t < 200 ? this.lastBoom : null;
+          const src = boom || (e.by && e.by !== me ? this.players.get(e.by) : null);
+          if (src) this.hud.damageFrom(boom ? boom.x : src.rx, boom ? boom.y : src.ry);
+        }
         if (e.by === me && e.v !== me) {
           this.hud.hitMarker();
           this.hud.damageNumber(e.v, e.d);
@@ -175,11 +204,20 @@ export class ClientGame {
       case 'k': {
         const v = this.players.get(e.v);
         if (v) {
-          v.alive = false; v.deadAt = performance.now();
+          v.alive = false; v.deadT = 0; v.z = 0;
+          // o corpo cai de costas, para longe de quem atirou, e escorrega um pouco
+          const killer = e.k && this.players.get(e.k);
+          v.fallAng = killer && killer !== v ? Math.atan2(killer.ry - v.ry, killer.rx - v.rx) : v.ra;
+          v.ra = v.fallAng;
+          v.slide = { x: v.rx, y: v.ry, dx: -Math.cos(v.fallAng), dy: -Math.sin(v.fallAng), d: e.w === 'shotgun' || e.w === 'sniper' || e.w === 'grenade' ? 1.4 : 0.7 };
+          v.landedDust = false;
           if (!v.inPlane) this.fx.burst(v.x, 1.0, v.y, [v.color, '#dc2626', '#1f2937'], 22, 7, 0.9, 0.16);
         }
         this.hud.killFeed(e);
-        if (e.k === me && e.v !== me) { this.hud.toast(`Você abateu ${this.nameOf(e.v)}!`, '#facc15'); this.sfx.killConfirm(); }
+        if (e.k === me && e.v !== me) {
+          this.hud.toast(`Você abateu ${this.nameOf(e.v)}!`, '#facc15'); this.sfx.killConfirm();
+          this.fovPunch = 4;
+        }
         if (e.v === me) this.onDeath(e);
         else if (this.dead && e.v === this.spectateId) this.spectateId = e.k && this.players.get(e.k)?.alive ? e.k : this.nextSpectate();
         break;
@@ -206,6 +244,7 @@ export class ClientGame {
         if (e.by === me) this.sfx.throwNade();
         break;
       case 'bm': {
+        this.lastBoom = { x: e.x, y: e.y, t: performance.now() };
         this.fx.removeNade(e.id, e.x, e.y);
         this.fx.explosion(e.x, e.y);
         this.sfx.explosion(e.x, e.y);
@@ -230,9 +269,17 @@ export class ClientGame {
 
   onOver(e) {
     this.over = true;
+    this.winnerId = e.winner;
+    // último abate em câmera lenta, e a câmera vai até o vencedor
+    this.slowMo = 1.6;
+    if (this.dead && e.winner) this.spectateId = e.winner;
     this.sfx.planeDrone(false);
     if (e.winner === this.meId) this.sfx.victory(); else if (!this.dead) this.sfx.defeat();
     this.hud.showFinal(e);
+  }
+
+  nearFocus(x, y) {
+    return Math.abs(x - this.camLook.x) < FX_RANGE && Math.abs(y - this.camLook.z) < FX_RANGE;
   }
 
   nextSpectate() {
@@ -363,6 +410,12 @@ export class ClientGame {
   // ------------------------------------------------------------- frame
   frame(dt) {
     this.frameCount++;
+    // câmera lenta no fim da partida: só os efeitos e animações desaceleram
+    let gdt = dt;
+    if (this.slowMo > 0) {
+      this.slowMo -= dt;
+      gdt = dt * (this.slowMo > 0.5 ? 0.25 : 0.25 + (0.5 - Math.max(0, this.slowMo)) * 1.5);
+    }
     this.input.pollPad();
     this.handlePresses();
 
@@ -392,7 +445,7 @@ export class ClientGame {
       this.net.send(msg);
     }
 
-    this.updatePlayers(dt);
+    this.updatePlayers(gdt);
     this.updateLoot(dt);
 
     if (this.plane) {
@@ -405,7 +458,7 @@ export class ClientGame {
       if (meP && meP.inPlane === false) this.sfx.planeDrone(false);
     }
     if (this.zone) this.zoneView.update(this.zone);
-    this.fx.update(dt);
+    this.fx.update(gdt);
 
     const f = this.focus();
     this.sfx.listener = { x: f.x, y: f.y };
@@ -435,31 +488,93 @@ export class ClientGame {
       p.ra += angleDiff(targetAim, p.ra) * Math.min(1, dt * 20);
 
       const c = p.char;
-      const showDead = !p.alive && performance.now() - p.deadAt < 50;
-      c.group.visible = (p.alive || showDead) && !p.inPlane;
+      if (!p.alive) { this.updateCorpse(p, dt); continue; }
+      c.group.visible = !p.inPlane;
       if (!c.group.visible) { this.hud.hideLabel(p); continue; }
       c.group.position.set(p.rx, p.rz, p.ry);
       c.body.rotation.y = -p.ra;
-      c.parachute.visible = p.rz > 0.3;
+      const falling = p.rz > 0.3;
+      c.parachute.visible = falling;
       c.parachute.rotation.y = -p.ra;
       c.setWeapon(p.w);
+      const near = this.nearFocus(p.rx, p.ry);
       const speed = Math.hypot(p.vx || 0, p.vy || 0);
-      if (speed > 1 && p.rz < 0.3) {
+      if (speed > 1 && !falling) {
         p.walk += dt * 13;
         const s = Math.sin(p.walk) * 0.6;
         c.legs[0].rotation.z = s; c.legs[1].rotation.z = -s;
         c.body.position.y = Math.abs(Math.cos(p.walk)) * 0.06;
+        // inclina o corpo na direção em que corre
+        c.group.rotation.x = clamp((p.vy || 0) * 0.012, -0.09, 0.09);
+        c.group.rotation.z = clamp(-(p.vx || 0) * 0.012, -0.09, 0.09);
+        p.stepT -= dt;
+        if (p.stepT <= 0 && near) { p.stepT = 0.26; this.fx.step(p.rx, p.ry); }
       } else {
         c.legs[0].rotation.z *= 0.8; c.legs[1].rotation.z *= 0.8;
-        c.body.position.y = p.rz > 0.3 ? 0 : Math.sin(performance.now() / 400) * 0.015;
+        c.group.rotation.x *= 0.85; c.group.rotation.z *= 0.85;
+        c.body.position.y = falling ? 0 : Math.sin(performance.now() / 400) * 0.015;
       }
+      if (falling) {
+        // pernas balançando e o paraquedas oscilando com o vento
+        const t = performance.now() / 1000 + p.ra;
+        c.legs[0].rotation.z = Math.sin(t * 3) * 0.25; c.legs[1].rotation.z = Math.sin(t * 3 + 1.2) * 0.25;
+        c.parachute.rotation.z = Math.sin(t * 1.3) * 0.06;
+        p.trailT -= dt;
+        if (p.trailT <= 0 && near) {
+          p.trailT = 0.05;
+          const a = -p.ra;
+          for (const side of [1, -1]) this.fx.trail(p.rx + Math.sin(a) * 1.7 * side, p.rz + 3.2, p.ry + Math.cos(a) * 1.7 * side);
+        }
+      }
+      // tranco da arma ao atirar: recua e levanta o cano
+      p.kick *= Math.exp(-dt * 16);
+      let gx = 0.46 - p.kick * 0.22;
       if (p.punchT > 0) {
         p.punchT -= dt;
-        c.gunMount.position.x = 0.46 + Math.sin((1 - p.punchT / 0.25) * Math.PI) * 0.45;
-      } else c.gunMount.position.x = 0.46;
+        gx += Math.sin((1 - p.punchT / 0.25) * Math.PI) * 0.45;
+      }
+      c.gunMount.position.x = gx;
       // inclina levemente ao curar/recarregar
-      c.gunMount.rotation.z = p.reloading ? -0.6 : p.healing ? 0.8 : 0;
+      c.gunMount.rotation.z = (p.reloading ? -0.6 : p.healing ? 0.8 : 0) + p.kick * 0.32;
+      c.body.rotation.z = p.kick * 0.05;
+      // "amassa" um instante ao levar dano
+      if (p.hitT > 0) {
+        p.hitT -= dt;
+        const k = Math.sin((Math.max(0, p.hitT) / 0.14) * Math.PI);
+        c.body.scale.set(1 + k * 0.14, 1 - k * 0.1, 1 + k * 0.14);
+      } else c.body.scale.set(1, 1, 1);
       this.hud.label(p, isMe);
+    }
+  }
+
+  // corpo cai de costas, quica, fica no chão e afunda antes de sumir
+  updateCorpse(p, dt) {
+    const c = p.char;
+    this.hud.hideLabel(p);
+    if (p.deadT === undefined) p.deadT = CORPSE_TIME;
+    p.deadT += dt;
+    const t = p.deadT;
+    if (p.inPlane || t > CORPSE_TIME) { c.group.visible = false; return; }
+    c.group.visible = true;
+    c.parachute.visible = false;
+    c.gunMount.visible = false;
+    c.body.scale.set(1, 1, 1);
+    c.body.rotation.y = -p.ra;
+    c.group.rotation.set(0, 0, 0);
+    let ang;
+    if (t < 0.38) ang = (Math.PI / 2) * (t / 0.38) ** 2;
+    else ang = Math.PI / 2 - Math.sin(Math.min(1, (t - 0.38) / 0.3) * Math.PI) * 0.18 * Math.exp(-(t - 0.38) * 3);
+    c.body.rotation.z = ang;
+    c.body.position.y = 0.24 * Math.min(1, t / 0.38);
+    c.legs[0].rotation.z = 0.25; c.legs[1].rotation.z = -0.1;
+    const sl = p.slide;
+    const k = sl ? 1 - (1 - Math.min(1, t / 0.4)) ** 2 : 0;
+    const x = sl ? sl.x + sl.dx * sl.d * k : p.rx, y = sl ? sl.y + sl.dy * sl.d * k : p.ry;
+    const sink = t > CORPSE_TIME - 1.2 ? (t - (CORPSE_TIME - 1.2)) * 0.6 : 0;
+    c.group.position.set(x, -sink, y);
+    if (!p.landedDust && t >= 0.38) {
+      p.landedDust = true;
+      if (this.nearFocus(x, y)) this.fx.dust(x - Math.cos(p.ra) * 1.2, y - Math.sin(p.ra) * 1.2, 6);
     }
   }
 
@@ -495,6 +610,8 @@ export class ClientGame {
     if (f.plane) H = 95;
     else if (f.z > 0.3) H = 25 + f.z * 1.0;
     else if (key === 'sniper' && !this.dead) H = 42;
+    // fim de partida: câmera desce até o vencedor
+    if (this.over && this.winnerId && this.players.get(this.winnerId)?.alive) H = 15;
 
     // olha um pouco para onde a mira aponta
     let lx = f.x, ly = f.y;
@@ -508,6 +625,14 @@ export class ClientGame {
     this.camPos.lerp(target, k);
     this.camLook.lerp(new THREE.Vector3(lx, 0, ly), k);
     this.camera.position.copy(this.camPos);
+    this.camera.position.x += this.camKick.x;
+    this.camera.position.z += this.camKick.y;
+    this.camKick.multiplyScalar(Math.exp(-dt * 12));
+    if (this.fovPunch > 0.01 || this.camera.fov !== 50) {
+      this.fovPunch *= Math.exp(-dt * 6);
+      this.camera.fov = 50 - (this.fovPunch > 0.01 ? this.fovPunch : 0);
+      this.camera.updateProjectionMatrix();
+    }
     if (this.shake > 0.001) {
       this.camera.position.x += (Math.random() - 0.5) * this.shake;
       this.camera.position.z += (Math.random() - 0.5) * this.shake;

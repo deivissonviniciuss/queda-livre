@@ -24,6 +24,10 @@ export class Hud {
     this.cache = {};
     this.hurtLevel = 0;
     this.hitT = 0;
+    this.bloom = 0;
+    this.dirs = [];
+    this.dirsEl = $('dmgdir');
+    this.dirsEl.innerHTML = '';
     this.toastTimer = null;
     this.v = new THREE.Vector3();
     this.mmCtx = $('minimap').getContext('2d');
@@ -182,6 +186,35 @@ export class Hud {
   }
 
   hitMarker() { this.hitT = 0.15; }
+  bloomKick(px) { this.bloom = Math.min(30, this.bloom + px); }
+
+  // arco vermelho em volta do jogador apontando para a origem do dano
+  damageFrom(x, y) {
+    let d = this.dirs.find((o) => Math.hypot(o.x - x, o.y - y) < 2);
+    if (!d) {
+      if (this.dirs.length >= 6) { this.dirs[0].el.remove(); this.dirs.shift(); }
+      const el = document.createElement('div');
+      el.className = 'dd';
+      this.dirsEl.appendChild(el);
+      d = { el };
+      this.dirs.push(d);
+    }
+    d.x = x; d.y = y; d.life = 1.4;
+  }
+
+  updateDamageDirs(dt) {
+    const f = this.g.focus();
+    const c = this.project(f.x, (f.z || 0) + 1, f.y);
+    for (let i = this.dirs.length - 1; i >= 0; i--) {
+      const d = this.dirs[i];
+      d.life -= dt;
+      const t = c && this.project(d.x, 1, d.y);
+      if (d.life <= 0 || !c || !t || this.g.dead) { d.el.remove(); this.dirs.splice(i, 1); continue; }
+      const a = Math.atan2(t.y - c.y, t.x - c.x);
+      d.el.style.transform = `translate(${c.x}px, ${c.y}px) rotate(${a}rad)`;
+      d.el.style.opacity = Math.min(1, d.life / 0.5).toFixed(2);
+    }
+  }
   hurt() { this.hurtLevel = Math.min(1, this.hurtLevel + 0.55); }
 
   toast(text, color = '#facc15') {
@@ -365,6 +398,14 @@ export class Hud {
       if (s) { cx = s.x; cy = s.y; }
     }
     ch.style.transform = `translate(${cx}px, ${cy}px)`;
+    // abertura da mira: dispersão real da arma (maior andando) + tranco dos tiros
+    const wk = g.currentWeaponKey();
+    const spread = WEAPONS[wk].spread || 0.02;
+    const moving = g.input.move();
+    const mv = Math.hypot(moving.x, moving.y) > 0.1 ? 1.6 : 1;
+    this.bloom *= Math.exp(-dt * 5);
+    const gap = 3 + spread * 90 * mv + this.bloom;
+    if (Math.abs((this.gap || 0) - gap) > 0.2) { this.gap = gap; ch.style.setProperty('--g', gap.toFixed(1) + 'px'); }
     this.hitT -= dt;
     const showCh = meP && meP.alive && !meP.inPlane && meP.rz < 0.3 && !g.menuOpen;
     this.set('crosshair', 'class', !showCh ? 'hidden-ch' : this.hitT > 0 ? 'hit' : g.lock ? 'lock' : '');
@@ -378,6 +419,7 @@ export class Hud {
     const outside = z && meP && meP.alive && !meP.inPlane && Math.hypot(f.x - z.x, f.y - z.y) > z.r;
     $('zone-tint').classList.toggle('on', !!outside);
 
+    this.updateDamageDirs(dt);
     if (g.frameCount % 2 === 0) this.drawMinimap();
   }
 }
